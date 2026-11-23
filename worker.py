@@ -20,7 +20,7 @@ Opsi simulasi (untuk pengujian di laporan):
     --simulate-delay 0.01   -> tambahan delay per domain (uji Load Balancing, Worker "lambat")
 
 Dependensi:
-    pip install dnspython psutil     (keduanya opsional tetapi sangat disarankan)
+    pip install -r requirements.txt  (keduanya opsional tetapi sangat disarankan)
     Tanpa dnspython, resolusi memakai socket.getaddrinfo (tanpa kontrol timeout per query).
 """
 

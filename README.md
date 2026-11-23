@@ -30,27 +30,28 @@ komunikasinya hanya teks JSON lewat TCP.
 
 Catatan khusus Windows:
 - Gunakan `python` atau `py` (bukan `python3`).
-- Pasang **dnspython**. Tanpanya, status `NXDOMAIN` di Windows bisa terbaca sebagai `ERROR`
-  karena kode error socket Windows berbeda.
+- Instal dependensi dari `requirements.txt` agar status `NXDOMAIN` di Windows ditangani
+  lebih konsisten.
 - `Ctrl+C` kadang telat merespons saat Worker menunggu Master. Pakai `Ctrl+Break`
   atau tutup jendela terminal.
 - Saat pertama dijalankan, Windows Defender Firewall akan memunculkan dialog. Pilih **Allow** (Master wajib).
 
 ## 2. Persiapan (semua node, Master maupun Worker)
 
-Kebutuhan: Python 3.8+ dan salin **kedua file** (`master.py` dan `worker.py`) ke folder yang sama
-di Master. Worker cukup memiliki `worker.py`.
+Kebutuhan: Python 3.8+ dan file `requirements.txt` pada setiap node. Master membutuhkan
+`master.py` dan `worker.py` di folder yang sama; Worker membutuhkan `worker.py`.
 
 ```bash
 # Linux
-python3 -m pip install dnspython psutil
+python3 -m pip install -r requirements.txt
 
 # Windows (PowerShell / CMD)
-py -m pip install dnspython psutil
+py -m pip install -r requirements.txt
 ```
 
-`dnspython` dan `psutil` sebenarnya opsional, tetapi `dnspython` memberi timeout per query dan
-bisa menentukan DNS server, sedangkan `psutil` dipakai untuk metrik CPU/Memory.
+`requirements.txt` memasang `dnspython` untuk timeout per query dan pemilihan DNS server,
+serta `psutil` untuk metrik CPU/Memory. Keduanya opsional untuk menjalankan program; tanpa
+keduanya, resolusi memakai `socket.getaddrinfo` dan metrik CPU/Memory tidak tersedia.
 
 ### Dataset domain
 
