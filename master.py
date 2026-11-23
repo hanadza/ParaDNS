@@ -706,8 +706,8 @@ def run_distributed(args, domains, cfg):
         time.sleep(0.5)
         waited += 0.5
         if args.wait_timeout and waited >= args.wait_timeout:
-            print(f"[Master] Batas tunggu tercapai. Lanjut dengan "
-                  f"{len(master.alive_workers())} Worker yang tersedia.")
+            print(f"[Master] Batas tunggu tercapai. Worker tersedia: "
+                  f"{len(master.alive_workers())}.")
             break
         if int(waited * 2) % 10 == 0:
             print(f"\r[Master] Worker terhubung: {len(master.alive_workers())}/{args.min_workers}",
@@ -716,6 +716,24 @@ def run_distributed(args, domains, cfg):
     if not master.alive_workers():
         print("[Master] Tidak ada Worker. Keluar.")
         sys.exit(1)
+
+    while True:
+        try:
+            answer = input("[Master] Ketik 'y' lalu Enter untuk mulai, atau 'n' untuk batal: ")
+        except EOFError:
+            print("\n[Master] Konfirmasi tidak tersedia. Task tidak dijalankan.")
+            master.shutdown_workers()
+            master.finished.set()
+            sys.exit(1)
+        answer = answer.strip().lower()
+        if answer == "y":
+            break
+        if answer == "n":
+            print("[Master] Dibatalkan. Task tidak dijalankan.")
+            master.shutdown_workers()
+            master.finished.set()
+            sys.exit(0)
+        print("[Master] Masukkan 'y' untuk mulai atau 'n' untuk batal.")
 
     master.start()
     while not master.finished.wait(2.0):

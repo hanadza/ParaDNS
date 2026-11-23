@@ -65,6 +65,8 @@ head -n 20000 top-1m.csv > domains.txt      # ambil 20.000 domain teratas
 ```
 
 Di laporan, tuliskan tanggal unduh dan ID/versi daftar Tranco yang dipakai.
+File dataset hasil unduh/generasi (`top-1m.csv.zip`, `top-1m.csv`, dan `domains.txt`)
+diabaikan Git melalui `.gitignore`.
 
 ## 3. Menjalankan
 
@@ -99,10 +101,25 @@ lokal yang meneruskan broadcast; jika broadcast dibatasi, gunakan `--master` den
 ```bash
 python3 master.py --mode distributed --domains domains.txt --limit 20000 --min-workers 3 --lb dynamic
 ```
-Master langsung mulai jika target `--min-workers` tercapai. Secara bawaan, jika target
-belum tercapai, Master menunggu maksimum 15 detik lalu menjalankan task dengan Worker
+Master menunggu sampai target `--min-workers` tercapai. Secara bawaan, jika target belum
+tercapai, Master menunggu maksimum 15 detik; setelah itu Master dapat lanjut dengan Worker
 yang sudah terhubung (minimal satu Worker harus tersedia). Gunakan `--wait-timeout 0`
 untuk tetap menunggu target tanpa batas atau `--wait-timeout 30` untuk menunggu 30 detik.
+Setelah Worker siap, Master meminta konfirmasi: ketik `y` lalu Enter untuk mulai, atau
+`n` lalu Enter untuk membatalkan. Task tidak dibagikan sebelum konfirmasi `y`.
+
+`--limit` adalah batas maksimal domain yang dibaca, sedangkan `--chunk-size` menentukan
+jumlah domain dalam satu task. Jumlah task kira-kira `ceil(jumlah domain / chunk-size)`.
+Dengan nilai bawaan `--chunk-size 500`, 200 domain hanya menjadi 1 task, 2.000 menjadi
+4 task, dan 20.000 menjadi 40 task. Setiap task dikerjakan oleh satu proses Worker;
+karena itu, task yang terlalu sedikit membuat sebagian proses/Worker menganggur.
+Resolusi DNS juga bergantung pada jaringan dan dapat menunggu hingga timeout.
+
+Untuk uji 200 domain dengan lebih banyak task:
+
+```bash
+python3 master.py --mode distributed --domains domains.txt --limit 200 --chunk-size 20 --min-workers 3 --lb dynamic
+```
 
 ### 3.3 Menjalankan Worker (tiap node Worker)
 
@@ -117,12 +134,14 @@ python3 worker.py
 
 Jika broadcast dibatasi jaringan, gunakan `--master 192.168.1.10 --port 5000`.
 Secara bawaan Worker memakai semua core. Batasi dengan `--processes 2` bila perlu.
+Terminal Worker menampilkan ID task dan jumlah domain yang diterima, progres resolusi
+sekitar tiap 10%, status domain terakhir pada setiap update, serta ringkasan saat task selesai.
 
 ### 3.4 Urutan lengkap satu sesi
 
 1. Jalankan Master (3.2).
 2. Jalankan Worker satu per satu di tiap node (3.3). Master menampilkan `Worker terdaftar: ...`.
-3. Setelah jumlah Worker mencapai `--min-workers`, proses otomatis mulai.
+3. Setelah jumlah Worker mencapai `--min-workers` (atau batas tunggu habis), konfirmasi mulai dengan mengetik `y` di terminal Master.
 4. Setelah selesai, Master menampilkan ringkasan dan menyimpan hasil ke folder `results/`. Worker berhenti sendiri.
 
 ## 4. Uji cepat di satu laptop (sebelum ke lab)
@@ -166,8 +185,8 @@ lalu ambil rata-ratanya.
 |---|---|---|
 | `--mode` | `distributed` | `sequential`, `local`, atau `distributed` |
 | `--domains` | (wajib) | File daftar domain |
-| `--limit` | 0 (semua) | Batasi jumlah domain |
-| `--chunk-size` | 500 | Domain per task |
+| `--limit` | 0 (semua) | Batas maksimal jumlah domain yang dibaca |
+| `--chunk-size` | 500 | Domain per task; menentukan jumlah task dan peluang paralelisme |
 | `--port` | 5000 | Port Master |
 | `--min-workers` | 1 | Mulai setelah N Worker terhubung |
 | `--wait-timeout` | 15 | Setelah batas ini, Master menjalankan task dengan Worker yang tersedia |

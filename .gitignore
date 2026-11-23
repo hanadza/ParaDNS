@@ -9,6 +9,9 @@ venv/
 # Generated results
 results/
 
+# Downloaded/generated domain datasets
+top-1m.csv.zip
+
 # OS files
 .DS_Store
 Thumbs.db

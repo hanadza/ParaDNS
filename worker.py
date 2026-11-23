@@ -100,18 +100,37 @@ def resolve_one(domain, resolver, cfg):
     return [domain, status, ";".join(ips), latency_ms]
 
 
-def resolve_chunk(task_id, domains, cfg, threads=1, simulate_delay=0.0):
+def resolve_chunk(task_id, domains, cfg, threads=1, simulate_delay=0.0,
+                  report_progress=False):
     """
     Satu TASK = satu potongan daftar domain.
     Fungsi ini dijalankan di proses anak (multiprocessing.Pool), jadi harus top-level.
     """
     t0 = time.perf_counter()
     resolver = make_resolver(cfg) if HAS_DNSPYTHON else None
+    progress_interval = max(1, len(domains) // 10)
+    progress_lock = threading.Lock()
+    completed = 0
 
     def work(domain):
+        nonlocal completed
         if simulate_delay:
             time.sleep(simulate_delay)
-        return resolve_one(domain, resolver, cfg)
+        result = resolve_one(domain, resolver, cfg)
+        if report_progress:
+            with progress_lock:
+                completed += 1
+                count = completed
+                if count % progress_interval == 0 or count == len(domains):
+                    detail = f"{domain}: {result[1]}"
+                    if result[2]:
+                        detail += f" ({result[2]})"
+                    print(
+                        f"[Worker] Task #{task_id} progres "
+                        f"{count}/{len(domains)} ({count / len(domains):.0%}) | {detail}",
+                        flush=True,
+                    )
+        return result
 
     if threads and threads > 1:
         with ThreadPoolExecutor(max_workers=threads) as ex:
@@ -255,11 +274,13 @@ class Worker:
     # ---- pemrosesan task ------------------------------------------------------
     def submit(self, msg):
         tid = msg["task_id"]
+        domains = msg["domains"]
         with self.cnt_lock:
             self.inflight += 1
+        print(f"[Worker] Menerima task #{tid}: {len(domains)} domain.", flush=True)
         self.pool.apply_async(
             resolve_chunk,
-            (tid, msg["domains"], self.cfg, self.threads, self.args.simulate_delay),
+            (tid, domains, self.cfg, self.threads, self.args.simulate_delay, True),
             callback=self.on_done,
             error_callback=lambda exc, t=tid: self.on_error(t, exc),
         )
@@ -269,6 +290,18 @@ class Worker:
             self.inflight -= 1
             self.completed += 1
             n = self.completed
+        status_counts = {}
+        for row in res["results"]:
+            status_counts[row[1]] = status_counts.get(row[1], 0) + 1
+        summary = ", ".join(
+            f"{status}={count}" for status, count in sorted(status_counts.items())
+        )
+        print(
+            f"[Worker] Task #{res['task_id']} selesai: {len(res['results'])} domain "
+            f"dalam {res['elapsed']:.2f} dtk"
+            + (f" | {summary}" if summary else ""),
+            flush=True,
+        )
         self.safe_send({
             "type": "result",
             "task_id": res["task_id"],
