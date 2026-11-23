@@ -69,39 +69,53 @@ Di laporan, tuliskan tanggal unduh dan ID/versi daftar Tranco yang dipakai.
 
 ### 3.1 Cek jaringan
 
-1. Semua perangkat harus berada di jaringan yang sama.
-2. Cari IP laptop Master: `ip -4 a` (Linux) atau `ipconfig` (Windows). Contoh: `192.168.1.10`.
-3. Buka port 5000 di firewall Master:
+1. Semua perangkat harus berada di jaringan yang sama dan broadcast UDP tidak diblokir.
+2. Buka port TCP 5000 dan UDP 5001 di firewall Master:
    ```bash
    # Linux (ufw)
    sudo ufw allow 5000/tcp
+   sudo ufw allow 5001/udp
    # Linux (Fedora/firewalld)
    sudo firewall-cmd --add-port=5000/tcp
+   sudo firewall-cmd --add-port=5001/udp
    # Windows (PowerShell sebagai Administrator)
    netsh advfirewall firewall add rule name="DNS Master" dir=in action=allow protocol=TCP localport=5000
+   netsh advfirewall firewall add rule name="DNS Master Discovery" dir=in action=allow protocol=UDP localport=5001
    ```
-4. Dari Worker, tes koneksi setelah Master jalan:
+   Jika memakai `--port` atau `--discover-port` yang berbeda, izinkan port yang dipilih.
+3. Worker tanpa opsi `--master` mencari Master otomatis melalui UDP port 5001. Untuk memeriksa koneksi TCP secara manual, cari IP Master dengan `ip -4 a` (Linux) atau `ipconfig` (Windows), lalu tes dari Worker:
    ```bash
    nc -zv 192.168.1.10 5000                       # Linux
    Test-NetConnection 192.168.1.10 -Port 5000     # Windows PowerShell
    ```
 
 Kalau antarperangkat tidak bisa saling ping, kemungkinan Wi-Fi memakai *client isolation*.
-Coba hotspot HP atau router/switch sendiri.
+Coba hotspot HP atau router/switch sendiri. Discovery otomatis hanya bekerja pada jaringan
+lokal yang meneruskan broadcast; jika broadcast dibatasi, gunakan `--master` dengan IP Master.
 
 ### 3.2 Menjalankan Master (laptop Master)
 
 ```bash
 python3 master.py --mode distributed --domains domains.txt --limit 20000 --min-workers 3 --lb dynamic
 ```
-Master akan menunggu sampai `--min-workers` Worker terhubung, baru mulai membagi task.
+Master langsung mulai jika target `--min-workers` tercapai. Secara bawaan, jika target
+belum tercapai, Master menunggu maksimum 15 detik lalu menjalankan task dengan Worker
+yang sudah terhubung (minimal satu Worker harus tersedia). Gunakan `--wait-timeout 0`
+untuk tetap menunggu target tanpa batas atau `--wait-timeout 30` untuk menunggu 30 detik.
 
 ### 3.3 Menjalankan Worker (tiap node Worker)
 
 ```bash
 python3 worker.py --master 192.168.1.10 --port 5000
 ```
-Ganti IP dengan IP Master. Secara bawaan Worker memakai semua core. Batasi dengan `--processes 2` bila perlu.
+IP Master bisa juga diisi manual. Secara bawaan Worker mencari Master otomatis di jaringan yang sama:
+
+```bash
+python3 worker.py
+```
+
+Jika broadcast dibatasi jaringan, gunakan `--master 192.168.1.10 --port 5000`.
+Secara bawaan Worker memakai semua core. Batasi dengan `--processes 2` bila perlu.
 
 ### 3.4 Urutan lengkap satu sesi
 
@@ -117,9 +131,9 @@ Buka 4 terminal di folder yang sama:
 ```bash
 # Terminal 1
 python3 master.py --domains domains.txt --limit 3000 --min-workers 2
-# Terminal 2 dan 3
-python3 worker.py --master 127.0.0.1 --processes 2
-python3 worker.py --master 127.0.0.1 --processes 2
+# Terminal 2 dan 3 (uji discovery otomatis)
+python3 worker.py --processes 2
+python3 worker.py --processes 2
 ```
 Kalau ringkasan muncul dan `results/results_*.csv` terbentuk, instalasi di laptop tersebut sudah benar.
 Ulangi di laptop Windows dan Linux yang akan dipakai.
@@ -155,6 +169,8 @@ lalu ambil rata-ratanya.
 | `--chunk-size` | 500 | Domain per task |
 | `--port` | 5000 | Port Master |
 | `--min-workers` | 1 | Mulai setelah N Worker terhubung |
+| `--wait-timeout` | 15 | Setelah batas ini, Master menjalankan task dengan Worker yang tersedia |
+| `--discover-port` | 5001 | Port UDP pencarian Master otomatis |
 | `--lb` | `dynamic` | `dynamic` atau `static` |
 | `--hb-timeout` | 6 | Detik tanpa kabar sebelum Worker dianggap mati |
 | `--task-timeout` | 120 | Batas waktu satu task |
@@ -169,8 +185,9 @@ lalu ambil rata-ratanya.
 
 | Parameter | Bawaan | Keterangan |
 |---|---|---|
-| `--master` | (wajib) | IP Master |
+| `--master` | kosong | IP Master; kosong = pencarian otomatis lewat broadcast |
 | `--port` | 5000 | Port Master |
+| `--discover-port` | 5001 | Port UDP pencarian Master otomatis |
 | `--processes` | semua core | Jumlah proses |
 | `--threads` | ikut Master | Thread per proses |
 | `--name` | hostname | Nama Worker di laporan |
@@ -180,16 +197,19 @@ lalu ambil rata-ratanya.
 ## 7. Keluaran
 
 Tersimpan di folder `results/`:
-- `results_<tag>.csv`: hasil per domain (domain, status, IP, latency, Worker yang memproses)
+- `results_<tag>.csv`: hasil per domain lengkap (domain, status, IP, latency, nama/IP Worker,
+  task, attempt, PID proses Worker, dan waktu pemrosesan task)
 - `metrics_<tag>.json`: Execution Time, Throughput, Speedup, Efficiency, CPU/Memory per Worker,
   jumlah task per Worker, load imbalance, serta daftar kegagalan beserta Recovery Time
+- `details_<tag>.json`: metadata run dan satu record JSON lengkap untuk setiap domain
 
 ## 8. Troubleshooting
 
 | Gejala | Kemungkinan penyebab |
 |---|---|
-| Worker: `Gagal konek ke Master` | IP/port salah, firewall Master belum dibuka, beda jaringan, atau Wi-Fi memblokir antarperangkat |
-| Master berhenti di `Menunggu minimal N Worker` | Jumlah Worker kurang. Turunkan `--min-workers` atau tambahkan Worker |
+| Worker tidak menemukan Master | Pastikan UDP 5001 diizinkan, perangkat satu jaringan, dan broadcast tidak diblokir; gunakan `--master IP` sebagai alternatif |
+| Worker: `Gagal konek ke Master` | IP/port salah, TCP 5000 belum dibuka, beda jaringan, atau Wi-Fi memblokir antarperangkat |
+| Master menunggu `--min-workers` | Master mulai setelah target tercapai atau timeout; tambahkan Worker, turunkan target, atau atur `--wait-timeout` |
 | Banyak status `TIMEOUT` | DNS publik membatasi query. Kurangi `--limit`, naikkan `--dns-timeout`, atau pakai resolver lokal |
 | Speedup lebih kecil dari yang diharapkan | DNS bersifat I/O-bound dan bisa terbatas oleh jaringan atau resolver. Coba `--threads 4` atau `8`, dan jadikan bahan analisis |
 | Hasil run ke-2 jauh lebih cepat | Cache resolver. Pakai subset domain berbeda per run atau rata-ratakan beberapa kali run |

@@ -37,6 +37,7 @@ import sys
 import threading
 import time
 from collections import Counter, deque
+from datetime import datetime, timezone
 
 from worker import HAS_DNSPYTHON, resolve_chunk
 
@@ -109,16 +110,71 @@ def summarize_rows(rows):
 
 def write_outputs(out_dir, tag, rows, metrics):
     os.makedirs(out_dir, exist_ok=True)
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    normalized_rows = [
+        list(r[:4]) + [
+            r[4] if len(r) > 4 else "",
+            r[5] if len(r) > 5 else "",
+            r[6] if len(r) > 6 else "",
+            r[7] if len(r) > 7 else 1,
+            r[8] if len(r) > 8 else "",
+            r[9] if len(r) > 9 else "",
+        ]
+        for r in rows
+    ]
     csv_path = os.path.join(out_dir, f"results_{tag}.csv")
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["domain", "status", "ips", "latency_ms", "worker"])
-        w.writerows(rows)
+        w.writerow([
+            "domain", "status", "resolved_ips", "latency_ms", "worker",
+            "worker_ip", "task_id", "attempt", "worker_pid", "task_elapsed_s",
+        ])
+        w.writerows(normalized_rows)
     json_path = os.path.join(out_dir, f"metrics_{tag}.json")
+    detail_path = os.path.join(out_dir, f"details_{tag}.json")
+    metrics["run_id"] = run_id
+    metrics["generated_at_utc"] = datetime.now(timezone.utc).isoformat()
+    metrics["output"] = {
+        "csv": csv_path,
+        "metrics_json": json_path,
+        "details_json": detail_path,
+    }
+    detailed_results = {
+        "run": {
+            "run_id": run_id,
+            "generated_at_utc": metrics["generated_at_utc"],
+            "mode": metrics.get("mode"),
+            "load_balancing": metrics.get("load_balancing"),
+            "domains_input": metrics.get("n_domains_input"),
+            "domains_processed": metrics.get("domains_processed"),
+            "dns_timeout_s": metrics.get("dns_timeout_s"),
+            "nameserver": metrics.get("nameserver"),
+        },
+        "summary": summarize_rows(rows),
+        "metrics": metrics,
+        "results": [
+            {
+                "domain": r[0],
+                "status": r[1],
+                "resolved_ips": r[2].split(";") if r[2] else [],
+                "latency_ms": r[3],
+                "worker": r[4],
+                "worker_ip": r[5],
+                "task_id": r[6],
+                "attempt": r[7],
+                "worker_pid": r[8],
+                "task_elapsed_s": r[9],
+            }
+            for r in normalized_rows
+        ],
+    }
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2, ensure_ascii=False)
+    with open(detail_path, "w", encoding="utf-8") as f:
+        json.dump(detailed_results, f, indent=2, ensure_ascii=False)
     print(f"\n[Master] Hasil  : {csv_path}")
     print(f"[Master] Metrik : {json_path}")
+    print(f"[Master] Detail : {detail_path}")
 
 
 def find_baseline(args):
@@ -265,6 +321,7 @@ class Master:
         self.workers = {}
         self.next_wid = 1
         self.results = {}
+        self.result_metadata = {}
         self.done_count = 0
         self.failed_count = 0
         self.domains_done = 0
@@ -285,9 +342,41 @@ class Master:
         srv.listen(64)
         threading.Thread(target=self._accept_loop, args=(srv,), daemon=True).start()
         threading.Thread(target=self._monitor_loop, daemon=True).start()
+        threading.Thread(target=self._discovery_loop, daemon=True).start()
         print(f"[Master] Listening di {self.args.host}:{self.args.port} | "
               f"{self.total_domains} domain -> {self.total_tasks} task "
               f"(chunk={self.args.chunk_size}) | LB={self.args.lb}")
+
+    def _discovery_loop(self):
+        udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        udp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            udp.bind(("0.0.0.0", self.args.discover_port))
+            udp.settimeout(1.0)
+        except OSError as exc:
+            print(f"[Master] Discovery UDP tidak aktif di port {self.args.discover_port}: {exc}")
+            udp.close()
+            return
+
+        print(f"[Master] Discovery aktif di UDP port {self.args.discover_port}")
+        while not self.finished.is_set():
+            try:
+                data, addr = udp.recvfrom(4096)
+                request = json.loads(data.decode("utf-8"))
+                if request.get("type") == "discover_master" and \
+                        request.get("service") == "paradns":
+                    response = json.dumps({
+                        "type": "master_found",
+                        "service": "paradns",
+                        "host": addr[0],
+                        "port": self.args.port,
+                    }).encode("utf-8")
+                    udp.sendto(response, addr)
+            except socket.timeout:
+                continue
+            except (OSError, UnicodeDecodeError, ValueError):
+                continue
+        udp.close()
 
     def _accept_loop(self, srv):
         while True:
@@ -360,7 +449,7 @@ class Master:
             return [w for w in self.workers.values() if w.alive]
 
     def start(self):
-        """Mulai pembagian task. Dipanggil setelah jumlah Worker minimum terpenuhi."""
+        """Mulai pembagian task setelah target Worker tercapai atau batas tunggu habis."""
         with self.lock:
             alive = sorted(self.alive_workers(), key=lambda x: x.id)
             self.n_workers_at_start = len(alive)
@@ -418,6 +507,12 @@ class Master:
             t.done_by = w.label
             t.done_at = now
             self.results[tid] = msg["results"]
+            self.result_metadata[tid] = {
+                "worker_ip": w.addr,
+                "attempt": t.attempts,
+                "worker_pid": msg.get("pid"),
+                "task_elapsed_s": round(msg.get("elapsed", 0.0), 6),
+            }
             self.done_count += 1
             self.domains_done += len(msg["results"])
             w.tasks_done += 1
@@ -543,7 +638,18 @@ class Master:
         for tid in sorted(self.tasks):
             t = self.tasks[tid]
             if t.status == "done":
-                rows.extend(r + [t.done_by] for r in self.results[tid])
+                meta = self.result_metadata[tid]
+                rows.extend(
+                    r + [
+                        t.done_by,
+                        meta["worker_ip"],
+                        tid,
+                        meta["attempt"],
+                        meta["worker_pid"],
+                        meta["task_elapsed_s"],
+                    ]
+                    for r in self.results[tid]
+                )
 
         per_worker = []
         for w in sorted(self.workers.values(), key=lambda x: x.id):
@@ -593,13 +699,15 @@ class Master:
 def run_distributed(args, domains, cfg):
     master = Master(args, domains, cfg)
     master.serve()
-    print(f"[Master] Menunggu minimal {args.min_workers} Worker terhubung...")
+    print(f"[Master] Menunggu minimal {args.min_workers} Worker terhubung "
+          f"(batas tunggu {args.wait_timeout} detik)...")
     waited = 0.0
     while len(master.alive_workers()) < args.min_workers:
         time.sleep(0.5)
         waited += 0.5
         if args.wait_timeout and waited >= args.wait_timeout:
-            print("[Master] Timeout menunggu Worker. Lanjut dengan Worker yang ada.")
+            print(f"[Master] Batas tunggu tercapai. Lanjut dengan "
+                  f"{len(master.alive_workers())} Worker yang tersedia.")
             break
         if int(waited * 2) % 10 == 0:
             print(f"\r[Master] Worker terhubung: {len(master.alive_workers())}/{args.min_workers}",
@@ -657,8 +765,12 @@ def parse_args():
     p.add_argument("--chunk-size", type=int, default=500, help="Jumlah domain per task")
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=5000)
-    p.add_argument("--min-workers", type=int, default=1, help="Mulai setelah N Worker terhubung")
-    p.add_argument("--wait-timeout", type=float, default=0, help="Batas tunggu Worker (detik, 0 = tanpa batas)")
+    p.add_argument("--min-workers", type=int, default=1,
+                   help="Target jumlah Worker; tetap mulai dengan Worker tersedia setelah timeout")
+    p.add_argument("--wait-timeout", type=float, default=15,
+                   help="Batas tunggu target Worker (detik, 0 = menunggu tak terbatas)")
+    p.add_argument("--discover-port", type=int, default=5001,
+                   help="Port UDP untuk Worker menemukan Master otomatis")
     p.add_argument("--lb", choices=["dynamic", "static"], default="dynamic")
     p.add_argument("--hb-timeout", type=float, default=6.0, help="Worker dianggap mati jika tak ada kabar (detik)")
     p.add_argument("--task-timeout", type=float, default=120.0, help="Batas waktu satu task (detik)")

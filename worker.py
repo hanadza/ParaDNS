@@ -11,6 +11,7 @@ Tugas Worker:
   4. Mengirim hasil ke Master + heartbeat berisi CPU/Memory (untuk monitoring).
 
 Contoh menjalankan (di tiap node Worker):
+    python3 worker.py
     python3 worker.py --master 192.168.1.10 --port 5000
     python3 worker.py --master 192.168.1.10 --processes 4
 
@@ -145,6 +146,65 @@ class Worker:
         self.pool = None
         self.worker_id = None
 
+    def discover_master(self):
+        udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            udp.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            udp.settimeout(1.0)
+            request = json.dumps({
+                "type": "discover_master",
+                "service": "paradns",
+            }).encode("utf-8")
+
+            for attempt in range(1, self.args.discover_retries + 1):
+                send_errors = []
+                for destination in (
+                    ("255.255.255.255", self.args.discover_port),
+                    ("127.0.0.1", self.args.discover_port),
+                ):
+                    try:
+                        udp.sendto(request, destination)
+                    except OSError as exc:
+                        send_errors.append(exc)
+                if len(send_errors) == 2:
+                    print(f"[Worker] Discovery UDP gagal: {send_errors[-1]}")
+
+                deadline = time.monotonic() + 1.0
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    udp.settimeout(remaining)
+                    try:
+                        data, addr = udp.recvfrom(4096)
+                    except socket.timeout:
+                        break
+                    except OSError as exc:
+                        print(f"[Worker] Discovery UDP gagal: {exc}")
+                        break
+
+                    try:
+                        response = json.loads(data.decode("utf-8"))
+                        if response.get("type") != "master_found" or \
+                                response.get("service") != "paradns":
+                            continue
+                        port = int(response.get("port", self.args.port))
+                    except (UnicodeDecodeError, ValueError, AttributeError):
+                        continue
+
+                    host = addr[0]
+                    print(f"[Worker] Master ditemukan otomatis: {host}:{port}")
+                    self.args.master = host
+                    self.args.port = port
+                    return
+
+                print(f"[Worker] Mencari Master otomatis... {attempt}/{self.args.discover_retries}")
+                time.sleep(1)
+        finally:
+            udp.close()
+        print("[Worker] Master tidak ditemukan lewat discovery otomatis.")
+        sys.exit(1)
+
     # ---- jaringan -----------------------------------------------------------
     def connect(self):
         for attempt in range(1, self.args.retries + 1):
@@ -214,6 +274,7 @@ class Worker:
             "task_id": res["task_id"],
             "results": res["results"],
             "elapsed": res["elapsed"],
+            "pid": res["pid"],
         })
         # Simulasi kegagalan Worker (crash mendadak, tanpa pamit ke Master)
         if self.args.crash_after and n >= self.args.crash_after:
@@ -256,8 +317,9 @@ class Worker:
 
     # ---- main loop ----------------------------------------------------------------
     def run(self):
-        # PENTING: Pool dibuat SEBELUM socket dibuka supaya proses anak tidak
-        # mewarisi socket (agar crash Worker terdeteksi cepat oleh Master).
+        if not self.args.master:
+            self.discover_master()
+        # Pool dibuat sebelum socket TCP dibuka agar proses anak tidak mewarisi socket.
         self.pool = mp.Pool(self.processes)
         self.connect()
         self.register()
@@ -294,8 +356,12 @@ class Worker:
 
 def parse_args():
     p = argparse.ArgumentParser(description="Worker - Distributed DNS Lookup")
-    p.add_argument("--master", required=True, help="IP/hostname Master")
+    p.add_argument("--master", default="", help="IP/hostname Master (kosong = cari Master otomatis)")
     p.add_argument("--port", type=int, default=5000)
+    p.add_argument("--discover-port", type=int, default=5001,
+                   help="Port UDP untuk mencari Master otomatis")
+    p.add_argument("--discover-retries", type=int, default=10,
+                   help="Jumlah percobaan pencarian Master otomatis")
     p.add_argument("--processes", type=int, default=0, help="Jumlah proses (default: semua core)")
     p.add_argument("--threads", type=int, default=0,
                    help="Thread per proses (default: ikut konfigurasi Master)")
